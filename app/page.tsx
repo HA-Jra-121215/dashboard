@@ -4,9 +4,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 
 let d3: any = null;
 let HexColorPicker: any = null;
-
-import("d3").then((mod) => { d3 = mod; });
-import("react-colorful").then((mod) => { HexColorPicker = mod.HexColorPicker; });
+let d3Promise: Promise<any> | null = null;
 
 // ------------------------ Types & Data ------------------------
 interface DataPoint { year: string; amount: number; change: string; }
@@ -111,7 +109,10 @@ export default function Dashboard() {
   const filteredData = current.data;
 
   useEffect(() => {
-    Promise.all([import("d3"), import("react-colorful")]).then(([d3Module, colorModule]) => {
+    if (!d3Promise) {
+      d3Promise = Promise.all([import("d3"), import("react-colorful")]);
+    }
+    d3Promise.then(([d3Module, colorModule]) => {
       d3 = d3Module;
       HexColorPicker = colorModule.HexColorPicker;
       setD3Loaded(true);
@@ -125,17 +126,26 @@ export default function Dashboard() {
   useEffect(() => { setRgb(hexToRgb(customColor)); }, [customColor]);
 
   const drawChart = useCallback(() => {
-    if (!chartRef.current || !containerRef.current || viewMode !== "chart" || !d3Loaded) return;
-    const d3Lib = d3, width = containerRef.current.clientWidth, height = 400, margin = { top: 50, right: 80, bottom: 40, left: 20 };
-    const innerW = Math.max(width - margin.left - margin.right, 300), innerH = height - margin.top - margin.bottom;
-    const svg = d3Lib.select(chartRef.current); svg.selectAll("*").remove(); svg.attr("width", width).attr("height", height);
+    if (!d3Loaded || !d3 || !chartRef.current || !containerRef.current || viewMode !== "chart") return;
+    
+    const d3Lib = d3;
+    const width = containerRef.current.clientWidth;
+    const height = 400;
+    const margin = { top: 50, right: 80, bottom: 40, left: 20 };
+    const innerW = Math.max(width - margin.left - margin.right, 300);
+    const innerH = height - margin.top - margin.bottom;
+    
+    const svg = d3Lib.select(chartRef.current);
+    svg.selectAll("*").remove();
+    svg.attr("width", width).attr("height", height);
     const g = svg.append("g").attr("transform", `translate(${margin.left},${margin.top})`);
-    const data = filteredData; if (!data.length) return;
+    const data = filteredData;
+    if (!data.length) return;
+    
     const x = d3Lib.scaleBand().domain(data.map((d: DataPoint) => d.year)).range([0, innerW]).padding(0.45);
     const yMax = (d3Lib.max(data, (d: DataPoint) => d.amount) ?? 0) * 1.15;
     const y = d3Lib.scaleLinear().domain([0, yMax]).range([innerH, 0]);
     const yTicks = y.ticks(6);
-    const secondHighestTick = yTicks.length >= 2 ? yTicks[yTicks.length - 2] : null;
     const pastColor = customColor, futureColor = lightenColor(customColor, 40), shadeColor = lightenColor(customColor, 70);
     
     if (showGrid) {
@@ -208,48 +218,66 @@ export default function Dashboard() {
       .select(".domain").remove();
     g.selectAll(".tick text").style("fill", "#94a3b8").style("font-size", "10px");
     
-    // Y-axis group (ticks and labels)
+    // ================= Y-AXIS (right side) =================
     const yAxisGroup = svg.append("g").attr("transform", `translate(${margin.left + innerW + 5},${margin.top})`)
-      .call(d3Lib.axisRight(y).tickValues(yTicks).tickFormat((d: number) => `$${d}B`).tickSize(0))
-      .select(".domain").remove();
-    yAxisGroup.selectAll("text")
-      .style("fill", (d: number) => (d === secondHighestTick ? "#fff" : "#cbd5e1"))
-      .style("font-size", "11px")
-      .style("font-weight", (d: number) => (d === secondHighestTick ? "bold" : "normal"))
-      .style("paint-order", "stroke")
-      .style("stroke", (d: number) => (d === secondHighestTick ? customColor : "none"))
-      .style("stroke-width", (d: number) => (d === secondHighestTick ? "16px" : "0"))
-      .style("stroke-linecap", "round")
-      .attr("dx", (d: number) => (d === secondHighestTick ? "8" : "0"));
+      .call(d3Lib.axisRight(y).tickValues(yTicks).tickFormat((d: number) => `$${d}B`).tickSize(0));
     
-    // Y-axis line and top arrow
+    // Remove the axis line (we'll draw our own)
+    yAxisGroup.select(".domain").remove();
+    // Style all tick labels light gray
+    yAxisGroup.selectAll(".tick text")
+      .style("fill", "#cbd5e1")
+      .style("font-size", "11px")
+      .style("font-weight", "normal")
+      .attr("dx", "0")
+      .attr("dy", "0.32em");
+    
+    // Get the last tick (top value) and add green background BEHIND the text, without moving it
+    const ticks = yAxisGroup.selectAll(".tick").nodes();
+    if (ticks && ticks.length > 0) {
+      const lastTick = d3Lib.select(ticks[ticks.length - 1]);
+      const lastTickText = lastTick.select("text");
+      if (!lastTickText.empty()) {
+        // Get bounding box of the text
+        const textNode = lastTickText.node() as SVGTextElement;
+        const bbox = textNode.getBBox();
+        const textX = parseFloat(lastTickText.attr("x") || "0");
+        const textY = parseFloat(lastTickText.attr("y") || "0");
+        
+        // Insert a rectangle before the text in the same parent group
+        // We need to insert it at the beginning of the <g> so it sits behind
+        lastTick.insert("rect", ":first-child")
+          .attr("x", textX - 8)   // padding left
+          .attr("y", textY - bbox.height / 2 - 2)
+          .attr("width", bbox.width + 16)
+          .attr("height", bbox.height + 6)
+          .attr("rx", (bbox.height + 6) / 2)
+          .attr("fill", customColor)
+          .attr("stroke", "none");
+        
+        // Change text color to white
+        lastTickText
+          .style("fill", "#fff")
+          .style("font-weight", "bold");
+      }
+    }
+    
+    // Y-axis line with small top arrow (light gray)
     const yAxisLineGroup = svg.append("g").attr("transform", `translate(${margin.left + innerW + 5},${margin.top})`);
-    const yAxisTop = -margin.top;
-    const yAxisBottom = innerH;
     yAxisLineGroup.append("line")
       .attr("x1", 0).attr("x2", 0)
-      .attr("y1", yAxisTop).attr("y2", yAxisBottom)
+      .attr("y1", 0).attr("y2", innerH)
       .attr("stroke", "#cbd5e1").attr("stroke-width", 1.5);
+    // Small arrow at the top of the Y-axis line
     yAxisLineGroup.append("path")
-      .attr("d", `M -5 ${yAxisTop - 6} L 0 ${yAxisTop - 14} L 5 ${yAxisTop - 6}`)
-      .attr("fill", "none").attr("stroke", "#cbd5e1").attr("stroke-width", 1.5)
+      .attr("d", `M -4 -5 L 0 -11 L 4 -5`)
+      .attr("fill", "none").attr("stroke", "#cbd5e1").attr("stroke-width", 1.2)
       .attr("stroke-linecap", "round").attr("stroke-linejoin", "round");
     
     // X-axis line (no arrow)
     const xAxisLineGroup = svg.append("g").attr("transform", `translate(${margin.left},${margin.top + innerH})`);
     xAxisLineGroup.append("line").attr("x1", 0).attr("y1", 0).attr("x2", innerW).attr("y2", 0)
       .attr("stroke", "#cbd5e1").attr("stroke-width", 1.5);
-    
-    // Green circle + small arrow at the top Y‑axis tick (the highest value)
-    const topTick = yTicks[yTicks.length - 1];
-    const topTickY = y(topTick);
-    yAxisGroup.append("circle")
-      .attr("cx", 0).attr("cy", topTickY).attr("r", 5)
-      .attr("fill", customColor).attr("stroke", "#fff").attr("stroke-width", 1);
-    yAxisGroup.append("path")
-      .attr("d", `M -10 ${topTickY - 5} L 0 ${topTickY - 12} L 10 ${topTickY - 5}`)
-      .attr("fill", "none").attr("stroke", customColor).attr("stroke-width", 1.5)
-      .attr("stroke-linecap", "round").attr("stroke-linejoin", "round");
     
     // Tooltip overlay
     const vLine = g.append("line").attr("y1", -20).attr("y2", innerH)
@@ -417,7 +445,7 @@ export default function Dashboard() {
         <div style={{ marginTop: 40, marginBottom: 40, borderTop: "1px solid #e2e8f0" }} />
 
         {/* Settings panel */}
-        {showSettings && (
+        {showSettings && HexColorPicker && (
           <div ref={settingsRef} style={{ position: "absolute", top: 100, right: 24, background: "#fff", border: "1px solid #e2e8f0", borderRadius: 12, padding: "8px 10px", boxShadow: "0 4px 12px rgba(0,0,0,0.08)", zIndex: 30, width: showColorPickerMode ? 240 : 200, transition: "width 0.2s ease" }}>
             {!showColorPickerMode ? (
               <>
